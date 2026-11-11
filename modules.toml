@@ -1,0 +1,118 @@
+# POLISCI 1 weekly modules: the only content source for the site. Edit here, then run `python build.py`.
+#
+# Per week:
+#   start     Monday of the week (YYYY-MM-DD); drives the dates shown and the "Jump to this week" button
+#   title     the syllabus part(s) the week covers
+#   sessions  class meetings, one line each
+#   note      optional one-line note (holiday, exam)
+#   readings, slides, homework
+#             a link, either an absolute http(s) URL or a file path under materials/ (e.g. "materials/w01-slides.pdf");
+#             leave "" until it is ready: the site shows "coming soon" (or "none this week" when the key is set to "none")
+#
+# Draft sequence: Syllabus Design - Winter 2027 (17 lectures). Homework weeks as in Fall 2026: 2, 3, 4, 6, 7, 8, 9.
+
+course = "POLISCI 1 · The Science of Politics"
+term = "Winter 2027"
+meetings = "Mondays and Wednesdays"
+
+[[week]]
+n = 1
+start = "2027-01-04"
+title = "Part 1: What is political science?"
+sessions = ["Mon Jan 4 · What is politics?", "Wed Jan 6 · The science of politics"]
+readings = ""
+slides = ""
+homework = "none"
+
+[[week]]
+n = 2
+start = "2027-01-11"
+title = "Part 2: Political behavior"
+sessions = ["Mon Jan 11 · Socialization and partisanship", "Wed Jan 13 · Identity"]
+readings = ""
+slides = ""
+homework = ""
+
+[[week]]
+n = 3
+start = "2027-01-18"
+title = "Part 2: Political behavior"
+sessions = ["Wed Jan 20 · Race, ethnicity and diversity"]
+note = "No class Mon Jan 18 (Martin Luther King Jr. Day)."
+readings = ""
+slides = ""
+homework = ""
+
+[[week]]
+n = 4
+start = "2027-01-25"
+title = "Parts 2–3: Political behavior; institutions"
+sessions = ["Mon Jan 25 · Polarization", "Wed Jan 27 · Elections and party systems"]
+readings = ""
+slides = ""
+homework = ""
+
+[[week]]
+n = 5
+start = "2027-02-01"
+title = "Part 3: Institutions"
+sessions = ["Mon Feb 1 · Accountability and representation", "Wed Feb 3 · Midterm exam (in class)"]
+readings = ""
+slides = ""
+homework = "none"
+
+[[week]]
+n = 6
+start = "2027-02-08"
+title = "Parts 3–4: Institutions; comparative politics"
+sessions = ["Mon Feb 8 · Inequality and redistribution", "Wed Feb 10 · Game theory and collective action"]
+readings = ""
+slides = ""
+homework = ""
+
+[[week]]
+n = 7
+start = "2027-02-15"
+title = "Part 4: Comparative politics"
+sessions = ["Wed Feb 17 · The state"]
+note = "No class Mon Feb 15 (Presidents' Day)."
+readings = ""
+slides = ""
+homework = ""
+
+[[week]]
+n = 8
+start = "2027-02-22"
+title = "Part 4: Comparative politics"
+sessions = ["Mon Feb 22 · Institutions and development", "Wed Feb 24 · Democracy and autocracy"]
+readings = ""
+slides = ""
+homework = ""
+
+[[week]]
+n = 9
+start = "2027-03-01"
+title = "Parts 4–5: Comparative politics; international relations and conflict"
+sessions = ["Mon Mar 1 · Regime change and backsliding", "Wed Mar 3 · Interstate war"]
+readings = ""
+slides = ""
+homework = ""
+
+[[week]]
+n = 10
+start = "2027-03-08"
+title = "Part 5 and capstone: International relations and conflict; immigration"
+sessions = ["Mon Mar 8 · Civil war", "Wed Mar 10 · Immigration"]
+readings = ""
+slides = ""
+homework = "none"
+
+[[week]]
+n = 11
+label = "Finals"
+start = "2027-03-15"
+title = "Final exam"
+sessions = ["Final exam, Mar 15–19 (time and room TBA)"]
+readings = "none"
+slides = "none"
+homework = "none"

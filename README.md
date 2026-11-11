@@ -1,32 +1,24 @@
-# POLISCI 1 · The Science of Politics · session guide
+# POLISCI 1 · The Science of Politics · course site
 
-Public, student-facing pages for POLISCI 1 (Stanford, Winter 2027): what to prepare before each lecture and what to review after it.
+Public, student-facing page for POLISCI 1 (Stanford, Winter 2027): one module per week, each linking that week's
+readings, slides and homework. Sticky "Jump to this week" button plus a week-by-week jump bar.
 Site: https://simonepaciphd.github.io/polisci1-science-of-politics/ (GitHub Pages, served from `docs/`).
-
-Same system as the POLISCI 158 session guide (`simonepaciphd/polisci158-ai-politics`).
 
 ## Maintaining
 
 ```
-sessions/sNN-slug.md    one file per session, the only content source (template: sessions/_TEMPLATE.md)
-build.py                sessions/ -> docs/ (public) or _preview/ (--preview, drafts included)
-check_links.py          checks every external link; run before each publish
-slides/sNN-slides.html  optional approved class deck (speaker notes stripped); its presence approves publication
-docs/                   generated site; do not edit by hand
+modules.toml     one [[week]] block per week, the only content source (format notes at the top of the file)
+materials/       optional local files to publish (e.g. materials/w03-slides.pdf); link them by that path
+build.py         modules.toml -> docs/index.html (+ docs/materials/); python build.py --check validates only
+check_links.py   checks every external link; run before each publish (python check_links.py 2 3 = weeks 2-3)
+docs/            generated site; do not edit by hand
 ```
 
-The schedule and session titles live in `SCHEDULE` and `TITLES` at the top of `build.py`. They follow the draft
-Winter 2027 sequence (17 lectures; midterm Wed Feb 3; no class Jan 18 or Feb 15). Update both when the sequence changes.
+To post a week's material: put its URL (or `materials/...` path) in `readings`, `slides` or `homework`; leave `""`
+for "coming soon" or write `"none"` for "none this week". Then `python check_links.py`, `python build.py`,
+commit `modules.toml`, `materials/` and `docs/` together, and push.
 
-Weekly cycle, per session:
+The schedule follows the draft Winter 2027 sequence (17 lectures; midterm Wed Feb 3; no class Jan 18 or Feb 15;
+homework weeks 2, 3, 4, 6, 7, 8, 9 as in Fall 2026). Update `modules.toml` when the sequence changes.
 
-1. **Prep.** Draft or revise `sessions/sNN-*.md`, set `status: prep` once approved by the instructors.
-2. `python check_links.py sNN` (no DEAD links; open MANUAL ones in a browser), then `python build.py`.
-3. Commit `sessions/` and `docs/` together; push.
-4. **Review.** After the session, fill in "After class", set `status: reviewed`, repeat steps 2-3.
-
-`status: draft` pages never reach `docs/`; moving a page back to draft removes it on the next build.
-`build.py` refuses to write when a linked item lacks a `<!-- from: ... -->` provenance comment, when public text cites
-a restricted source (Canvas-only material, unpublished work, local files), or when template text is left in.
-
-Requires Python 3.9+, pandoc 3.x, beautifulsoup4, and Quarto 1.10+ (only once a session is published).
+Requires Python 3.11+ (standard library only).

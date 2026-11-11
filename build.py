@@ -1,402 +1,175 @@
-"""Build the POLISCI 1 session-guide site from sessions/*.md into docs/ (GitHub Pages, served from /docs).
-Each session becomes a Quarto reveal.js deck (generated .qmd in _build/, rendered self-contained); build.py writes
-the index page itself.
+"""Build the POLISCI 1 weekly-module site from modules.toml into docs/ (GitHub Pages, served from /docs).
 
-    python build.py              public build: only sessions with status prep or reviewed -> docs/
-    python build.py --preview    every session, drafts included and bannered -> _preview/ (git-ignored)
+    python build.py              write docs/index.html (+ docs/materials/ for any linked local files)
+    python build.py --check      validate modules.toml only, write nothing
 
-The Markdown in sessions/ is the only content source. This script holds the schedule, interface copy, styles and
-checks, never session content. It stops with an error, and writes nothing, when a check fails:
-  - a session file is missing, its front matter is incomplete, or its date disagrees with SCHEDULE
-  - a restricted source appears in public text (RESTRICTED below: Canvas-only material, unpublished work, local files)
-  - a linked list item has no provenance comment ("<!-- from: ... -->")
-  - a link is not absolute http(s), or template placeholder text is left in
-Needs Python 3.9+, Quarto 1.10+, pandoc 3.x on PATH (used by --check), and beautifulsoup4.
-Links are checked separately: python check_links.py
+modules.toml is the only content source; this script holds the page template, styles and checks. It stops with an
+error, and writes nothing, when a check fails:
+  - a week lacks n, start or title, weeks are out of order, or a start date is not a Monday
+  - a link is neither an absolute http(s) URL nor an existing file under materials/
+External links are checked separately: python check_links.py
+Needs Python 3.11+ (tomllib); no other dependencies.
 """
-import datetime as dt, html, pathlib, re, shutil, subprocess, sys
-
-try:
-    from bs4 import BeautifulSoup
-except ImportError:
-    sys.exit("build: beautifulsoup4 is missing (pip install beautifulsoup4)")
+import datetime as dt, html, pathlib, re, shutil, sys, tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent
-SRC = ROOT / "sessions"
-COURSE_LINE = "POLISCI 1 · The Science of Politics · Stanford · Winter 2027"
-SITE_TITLE = "Session guide"
-
-# All lecture sessions of the Winter 2027 draft sequence (Syllabus Design - Winter 2027): session number -> date.
-# The midterm (Wed Feb 3) and final exam are not sessions. Update both dicts whenever the sequence changes.
-SCHEDULE = {1: "2027-01-04", 2: "2027-01-06", 3: "2027-01-11", 4: "2027-01-13", 5: "2027-01-20",
-            6: "2027-01-25", 7: "2027-01-27", 8: "2027-02-01", 9: "2027-02-08", 10: "2027-02-10",
-            11: "2027-02-17", 12: "2027-02-22", 13: "2027-02-24", 14: "2027-03-01", 15: "2027-03-03",
-            16: "2027-03-08", 17: "2027-03-10"}
-TITLES = {1: "What Is Politics?", 2: "The Science of Politics", 3: "Socialization and Partisanship",
-          4: "Identity", 5: "Race, Ethnicity, and Diversity", 6: "Polarization",
-          7: "Elections and Party Systems", 8: "Accountability and Representation",
-          9: "Inequality and Redistribution", 10: "Game Theory and Collective Action", 11: "The State",
-          12: "Institutions and Development", 13: "Democracy and Autocracy",
-          14: "Regime Change and Backsliding", 15: "Interstate War", 16: "Civil War", 17: "Immigration"}
-STATUSES = ("draft", "prep", "reviewed")
-PUBLIC = ("prep", "reviewed")
-REQUIRED = ("session", "date", "title", "status", "based_on")
-
-# Public text must never cite these. Case-insensitive regexes, checked after maintainer comments are stripped.
-RESTRICTED = [
-    r"canvas", r"dropbox", r"file:", r"\.pptx?\b", r"\.docx?\b",
-    r"manuscript", r"\bR&R\b", r"reviewer", r"under review", r"\bsubmission\b",
-]
-PLACEHOLDERS = [r"example\.org", r"Session title as in", r"Question one", r"What to look for\.", r"Two to four sentences"]
-
-UI = {"contents": "Sessions", "soon": "coming soon", "prep": "prep", "reviewed": "prep and review",
-      "draft_banner": "Preview only. This deck is a draft and is not published.",
-      "draft_short": "Draft preview, not published",
-      "project": "Final project guide →",
-      "based_on": "Adapted from", "back": "All sessions"}
-
-errors, warnings = [], []
+SRC = ROOT / "modules.toml"
+LINKS = (("readings", "Readings"), ("slides", "Slides"), ("homework", "Homework"))
+errors = []
 
 
-def parse(path):
-    raw = path.read_bytes().decode("utf-8-sig")
-    m = re.match(r"---\r?\n(.*?)\r?\n---\r?\n", raw, re.S)
-    if not m:
-        errors.append(f"{path.name}: no front matter")
-        return None
-    meta = {}
-    for line in m.group(1).splitlines():
-        line = re.sub(r"\s+#.*$", "", line).strip()
-        if line:
-            k, _, v = line.partition(":")
-            meta[k.strip()] = v.strip().strip('"')
-    body = raw[m.end():]
-    for k in REQUIRED:
-        if not meta.get(k):
-            errors.append(f"{path.name}: front matter lacks '{k}'")
-    if errors:
-        return None
-    n = int(meta["session"])
-    if n not in SCHEDULE:
-        errors.append(f"{path.name}: session {n} is not in the schedule")
-    elif meta["date"] != SCHEDULE[n]:
-        errors.append(f"{path.name}: date {meta['date']} disagrees with the syllabus ({SCHEDULE[n]})")
-    if meta["status"] not in STATUSES:
-        errors.append(f"{path.name}: status '{meta['status']}' is not one of {STATUSES}")
-
-    # provenance: every linked list item carries a from-comment (checked on the raw text, before stripping)
-    for i, line in enumerate(body.splitlines(), 1):
-        if re.match(r"\s*[-*] ", line) and re.search(r"\]\(", line) and "<!-- from:" not in line:
-            errors.append(f"{path.name}:{i}: linked item without a provenance comment")
-    public = re.sub(r"<!--.*?-->", "", body, flags=re.S)
-    for pat in RESTRICTED:
-        for mm in re.finditer(pat, public, re.I):
-            ln = public[:mm.start()].count("\n") + 1
-            errors.append(f"{path.name}: restricted source pattern '{pat}' in public text (body line ~{ln})")
-    for pat in PLACEHOLDERS:
-        if re.search(pat, public):
-            errors.append(f"{path.name}: template placeholder left in ('{pat}')")
-    for url in re.findall(r"\]\(([^)\s]+)", public):
-        if not re.match(r"https?://", url):
-            errors.append(f"{path.name}: link '{url}' is not an absolute http(s) URL")
-    return {"n": n, "meta": meta, "md": public, "file": path.name, "slug": f"s{n:02d}"}
-
-
-def to_html(md, prefix):
+def load():
     try:
-        r = subprocess.run(["pandoc", "-f", "gfm", "-t", "html5", f"--id-prefix={prefix}-"],
-                           input=md.encode("utf-8"), capture_output=True, check=True)
-    except FileNotFoundError:
-        sys.exit("build: pandoc is not on PATH")
-    except subprocess.CalledProcessError as e:
-        sys.exit(f"build: pandoc failed on {prefix}: {e.stderr.decode('utf-8', 'replace')}")
-    return r.stdout.decode("utf-8")
+        data = tomllib.loads(SRC.read_text(encoding="utf-8-sig"))
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        sys.exit(f"build: cannot read {SRC.name}: {e}")
+    weeks, last, local = data.get("week", []), 0, []
+    if not weeks:
+        errors.append("modules.toml has no [[week]] entries")
+    for w in weeks:
+        tag = f"week {w.get('n', '?')}"
+        missing = [k for k in ("n", "start", "title") if not w.get(k)]
+        if missing:
+            errors.append(f"{tag}: missing {', '.join(missing)}")
+            continue
+        if w["n"] <= last:
+            errors.append(f"{tag}: weeks must be numbered in increasing order")
+        last = w["n"]
+        try:
+            d = dt.date.fromisoformat(str(w["start"]))
+            if d.weekday() != 0:
+                errors.append(f"{tag}: start {d} is not a Monday")
+            w["start"] = d
+        except ValueError:
+            errors.append(f"{tag}: start '{w['start']}' is not YYYY-MM-DD")
+        for key, _ in LINKS:
+            v = str(w.get(key, "")).strip()
+            w[key] = v
+            if v in ("", "none") or re.match(r"https?://\S+$", v):
+                continue
+            if v.startswith("materials/") and (ROOT / v).is_file():
+                local.append(v)
+            else:
+                errors.append(f"{tag}: {key} '{v}' is not an http(s) URL or an existing materials/ file")
+    return data, weeks, local
 
 
-def drop_empty_sections(soup):
-    """Remove h3 headings with nothing under them, then h2 sections left with nothing but headings."""
-    for level, stops in (("h3", ("h2", "h3")), ("h2", ("h2",))):
-        for h in soup.find_all(level):
-            sib, content = h.next_sibling, False
-            while sib is not None and getattr(sib, "name", None) not in stops:
-                if getattr(sib, "name", None) or str(sib).strip():
-                    content = True
-                sib = sib.next_sibling
-            if not content:
-                h.decompose()
+def link_cell(w, key, label):
+    v = w[key]
+    if v == "none":
+        return f'<span class="chip off">{label}<small>none this week</small></span>'
+    if not v:
+        return f'<span class="chip soon">{label}<small>coming soon</small></span>'
+    ext = ' target="_blank" rel="noopener"' if v.startswith("http") else ""
+    return f'<a class="chip" href="{html.escape(v)}"{ext}>{label}<small>open</small></a>'
 
 
-def md_sections(md):
-    """Split session Markdown into [(h2, lines, [(h3, lines), ...]), ...], dropping headings with no content."""
-    out, h2, h3 = [], None, None
-    for line in md.splitlines():
-        if line.startswith("## "):
-            h2 = [line[3:].strip(), [], []]
-            out.append(h2)
-            h3 = None
-        elif line.startswith("### ") and h2 is not None:
-            h3 = [line[4:].strip(), []]
-            h2[2].append(h3)
-        elif h3 is not None:
-            h3[1].append(line)
-        elif h2 is not None:
-            h2[1].append(line)
-    has = lambda lines: any(l.strip() for l in lines)
-    result = []
-    for title, lines, subs in out:
-        subs = [(t, l) for t, l in subs if has(l)]
-        if has(lines) or subs:
-            result.append((title, lines, subs))
-    return result
+def week_label(w):
+    return w.get("label") or f"Week {w['n']}"
 
 
-CARDINAL = "#8c1515"                             # Stanford cardinal; section and title slides
+def span(w):
+    s, e = w["start"], w["start"] + dt.timedelta(days=4)
+    fmt = lambda d: d.strftime("%b ") + str(d.day)
+    return f"{fmt(s)}–{e.day}" if e.month == s.month else f"{fmt(s)} – {fmt(e)}"
 
 
-def yq(text):
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def to_qmd(s, prev_s, next_s):
-    """One reveal.js deck: title, a slide per h2 without subsections, a section slide plus a slide per h3 otherwise."""
-    m = s["meta"]
-    sub = f"Session {s['n']} · {when(m['date'])}" + (f" · {UI['draft_short']}" if m["status"] == "draft" else "")
-    head = ["---", f"title: {yq(m['title'])}", f"subtitle: {yq(sub)}", f"author: {yq(COURSE_LINE)}", "lang: en",
-            "format:", "  revealjs:", "    theme: [default, theme.scss]", "    slide-number: true",
-            *(["    center: true"] if str(m.get("center", "")).strip().lower() == "true" else []),
-            "    scrollable: true", "    link-external-newwindow: true",
-            "    hash-type: number", "    controls: true", "    progress: true",
-            f"    footer: {yq('Stanford University · [' + UI['back'] + '](index.html)')}",
-            f"title-slide-attributes:", f"  data-background-color: {yq(CARDINAL)}", "---", ""]
-    body = []
-    sections = md_sections(s["md"])
-    body += ["## Roadmap {.roadmap}", ""] + [f"1. {t}" for t, _, _ in sections] + [""]
-    for title, lines, subs in sections:
-        if subs:
-            body += [f'# {title} {{.section background-color="{CARDINAL}"}}', ""]
-            if any(l.strip() for l in lines):
-                body += lines + [""]
-            for t, l in subs:
-                n_items = sum(1 for x in l if re.match(r"\s*[-*] ", x))
-                cls = " {.dense}" if n_items > 5 else ""
-                body += [f"## {t}{cls}", ""] + l + [""]
-        else:
-            body += [f"## {title}", ""] + lines + [""]
-    pager = []
-    if prev_s:
-        pager.append(f'[← {prev_s["meta"]["title"]}]({prev_s["slug"]}.html)')
-    if next_s:
-        pager.append(f'[{next_s["meta"]["title"]} →]({next_s["slug"]}.html)')
-    body += ["## About this deck", "", f'{UI["based_on"]} {m["based_on"]}.', "",
-             '::: {.provenance}', FOOTER_MD, ":::", ""]
-    if pager:
-        body += ['::: {.pager}'] + [f"{p}  " for p in pager] + [":::", ""]
-    return "\n".join(head + body)
-
-
-def when(date):
-    d = dt.date.fromisoformat(date)
-    return d.strftime("%a, %b ") + str(d.day)
-
-
-def page(title, nav, main, banner=""):
+def render(data, weeks):
+    course, term = html.escape(data.get("course", "POLISCI 1")), html.escape(data.get("term", ""))
+    jump = "\n".join(f'<a href="#week-{w["n"]}">{html.escape(w.get("label") or str(w["n"]))}</a>' for w in weeks)
+    cards = []
+    for w in weeks:
+        sessions = "".join(f"<li>{html.escape(s)}</li>" for s in w.get("sessions", []))
+        note = f'<p class="note">{html.escape(w["note"])}</p>\n' if w.get("note") else ""
+        links = "".join(link_cell(w, k, lab) for k, lab in LINKS)
+        cards.append(f"""<section class="module" id="week-{w['n']}" data-start="{w['start'].isoformat()}">
+<p class="kicker">{html.escape(week_label(w))} · {span(w)}</p>
+<h2>{html.escape(w['title'])}</h2>
+<ul class="sessions">{sessions}</ul>
+{note}<div class="links">{links}</div>
+</section>""")
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(title)}</title>
+<title>{course} · {term}</title>
 {FONTS}
 <style>{CSS}</style>
 </head>
 <body>
-<div class="layout">
 <header class="site">
-<p><a href="index.html">{html.escape(COURSE_LINE)}</a></p>
-<p class="site-title">{html.escape(SITE_TITLE)}</p>
-{banner}
+<p class="eyebrow">Stanford University · {term}</p>
+<h1>{course}</h1>
+<p class="intro">One module per week. Each module links that week's readings, slides and homework as they are posted.</p>
 </header>
-<nav aria-label="{UI['contents']}">
-<p class="nav-group">{UI['contents']}</p>
-{nav}
-</nav>
+<nav class="jump" aria-label="Jump to week"><div class="jump-inner">
+<a class="now" id="jump-now" href="#week-{weeks[0]['n']}">Jump to this week</a>
+<span class="jump-label">Week</span>
+{jump}
+</div></nav>
 <main>
-{main}
+{chr(10).join(cards)}
+<p class="provenance">{FOOTER}</p>
 </main>
-</div>
+<script>{JS}</script>
 </body>
 </html>
 """
 
 
-def nav_html(sessions, shown, current=None):
-    items = []
-    for s in sessions:
-        label = f"{s['n']} · {html.escape(s['meta']['title'])}"
-        if s["slug"] in shown:
-            cur = ' aria-current="page"' if s["slug"] == current else ""
-            items.append(f'<li><a href="{s["slug"]}.html"{cur}>{label}</a></li>')
-        elif (ROOT / "slides" / f'{s["slug"]}-slides.html').exists():
-            items.append(f'<li><a href="slides/{s["slug"]}-slides.html">{label}</a></li>')
-        else:
-            items.append(f'<li><span class="muted">{label}</span></li>')
-    return "<ul>\n" + "\n".join(items) + "\n</ul>"
-
-
 def main():
-    if "--check" in sys.argv[1:]:                # validate named files only, write nothing: python build.py --check s04
-        wanted = tuple(a for a in sys.argv[1:] if not a.startswith("--"))
-        for p in sorted(SRC.glob("s[0-9][0-9]-*.md")):
-            if p.name.startswith(wanted):
-                s = parse(p)
-                if s:
-                    drop_empty_sections(BeautifulSoup(to_html(s["md"], s["slug"]), "html.parser"))
-                    print(f"checked {p.name}")
-        for e in errors:
-            print("ERROR:", e, file=sys.stderr)
-        sys.exit(1 if errors else 0)
-    preview = "--preview" in sys.argv[1:]
-    out = ROOT / ("_preview" if preview else "docs")
-    files = sorted(p for p in SRC.glob("s[0-9][0-9]-*.md"))
-    sessions = [s for s in (parse(p) for p in files) if s]
-    have = {s["n"] for s in sessions}
-    for n in SCHEDULE:
-        if n not in have:                        # not drafted yet: listed as coming soon under its syllabus title
-            warnings.append(f"no session file yet for session {n}")
-            sessions.append({"n": n, "meta": {"title": TITLES[n], "date": SCHEDULE[n], "status": "draft"},
-                             "md": "", "file": "(none)", "slug": f"s{n:02d}", "stub": True})
-            have.add(n)
-    if len({s["n"] for s in sessions}) != len(sessions):
-        errors.append("two files claim the same session number")
+    data, weeks, local = load()
     if errors:
         for e in errors:
             print("ERROR:", e, file=sys.stderr)
         sys.exit(f"build: {len(errors)} error(s); nothing written")
-    sessions.sort(key=lambda s: s["n"])
-    shown = [s for s in sessions if not s.get("stub") and (preview or s["meta"]["status"] in PUBLIC)]
-    shown_slugs = {s["slug"] for s in shown}
-
-    decks = {}                                   # name -> self-contained reveal.js HTML rendered by Quarto
-    work = ROOT / "_build"
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir()
-    shutil.copy(ROOT / "theme.scss", work / "theme.scss")
-    # a website project so all decks share one copy of the reveal.js libraries (site_libs/)
-    (work / "_quarto.yml").write_text("project:\n  type: website\n  output-dir: _site\nwebsite:\n  title: POLISCI 1\n",
-                                      encoding="utf-8", newline="\n")
-    for i, s in enumerate(shown):
-        prev_s, next_s = (shown[i - 1] if i else None), (shown[i + 1] if i + 1 < len(shown) else None)
-        (work / f'{s["slug"]}.qmd').write_text(to_qmd(s, prev_s, next_s), encoding="utf-8", newline="\n")
-    site = work / "_site"
-    if shown:
-        quarto = shutil.which("quarto") or r"C:\Program Files\Quarto\bin\quarto.exe"
-        try:
-            r = subprocess.run([quarto, "render", "--quiet"], cwd=work,
-                               capture_output=True, text=True, encoding="utf-8", errors="replace")
-        except FileNotFoundError:
-            sys.exit("build: quarto is not installed (winget install Posit.Quarto)")
-        if r.returncode:
-            errors.append(f"quarto render failed: {(r.stderr or r.stdout).strip()[-800:]}")
-        for s in shown:
-            out_html = site / f'{s["slug"]}.html'
-            if out_html.exists():
-                decks[out_html.name] = out_html.read_text(encoding="utf-8")
-            elif not r.returncode:
-                errors.append(f'{s["file"]}: quarto produced no {out_html.name}')
-    rendered = {}
-
-    rows, slide_files = [], []
-    for s in sessions:
-        m, st = s["meta"], s["meta"]["status"]
-        title = html.escape(m["title"])
-        slides = f'slides/{s["slug"]}-slides.html'   # class slides (speaker notes stripped), optional per session
-        has_slides = (ROOT / slides).exists()  # approved class deck may precede the prep page
-        if has_slides:
-            slide_files.append(slides)
-        link = (f'<a href="{slides}">{title}</a>' if has_slides
-                else f'<a href="{s["slug"]}.html">{title}</a>' if s["slug"] in shown_slugs else title)
-        state = (f'<a href="{s["slug"]}.html">{UI[st]}</a>' if st in PUBLIC
-                 else "draft (preview)" if preview and not s.get("stub") else UI["soon"])
-        rows.append(f"<tr><td>{s['n']}</td><td>{when(m['date'])}</td><td>{link}</td><td>{state}</td></tr>")
-    # optional course-project guide (as in POLISCI 158): public only once Simone approves it: an empty project/PUBLISH marker; previews always show it
-    has_project = (ROOT / "project" / "index.html").exists() and (preview or (ROOT / "project" / "PUBLISH").exists())
-    if (ROOT / "project" / "index.html").exists() and not has_project:
-        warnings.append("project/ staged but not approved for publication (no project/PUBLISH); left out of docs/")
-    project_line = (f'<p class="project-link"><a href="project/index.html">{UI["project"]}</a></p>\n'
-                    if has_project else "")
-    index_main = (f"<h1>{html.escape(SITE_TITLE)}</h1>\n{INTRO}\n{project_line}"
-                  '<div class="table-wrap"><table><thead><tr><th>#</th><th>Date</th><th>Session</th><th>Status</th>'
-                  f"</tr></thead><tbody>\n{chr(10).join(rows)}\n</tbody></table></div>\n{FOOTER}")
-    rendered["index.html"] = page(f"{SITE_TITLE} · POLISCI 1", nav_html(sessions, shown_slugs), index_main)
-
-    # internal links must land on a page we are writing (decks: only the links we put in, i.e. the pager and footer)
-    built = set(rendered) | set(decks)
-    for name, text in rendered.items():
-        for a in BeautifulSoup(text, "html.parser").find_all("a", href=True):
-            h = a["href"]
-            if (h.startswith("project/") and has_project) or h in slide_files:
-                continue
-            if not h.startswith(("http", "#", "mailto:", "data:")) and h.split("#")[0] not in built:
-                errors.append(f"{name}: internal link to {h} which is not built")
-    for s in shown:
-        for h in re.findall(r"\]\(([\w-]+\.html)\)", (work / f'{s["slug"]}.qmd').read_text(encoding="utf-8")):
-            if h not in built:
-                errors.append(f'{s["slug"]}.qmd: internal link to {h} which is not built')
-    rendered.update(decks)
-    if errors:
-        for e in errors:
-            print("ERROR:", e, file=sys.stderr)
-        sys.exit(f"build: {len(errors)} error(s); nothing written")
-
+    if "--check" in sys.argv[1:]:
+        print(f"checked {len(weeks)} week(s)")
+        return
+    out = ROOT / "docs"
     out.mkdir(exist_ok=True)
-    for stale in out.glob("*.html"):            # a session moved back to draft must disappear from the site
-        if stale.name not in rendered:
-            stale.unlink()
-            print(f"removed {stale.relative_to(ROOT)}")
-    for d in out.iterdir():                      # generated library folders are replaced wholesale
-        if d.is_dir() and (d.name == "site_libs" or d.name.endswith("_files")):
-            shutil.rmtree(d)
-    if site.exists():
-        for d in site.iterdir():
-            if d.is_dir():
-                shutil.copytree(d, out / d.name)
-    if (out / "project").exists():               # static final-project subpage, copied as-is from project/
-        shutil.rmtree(out / "project")
-    if has_project:
-        shutil.copytree(ROOT / "project", out / "project", ignore=shutil.ignore_patterns("PUBLISH"))
-    if (out / "slides").exists():                # class slides: only those of sessions on the site
-        shutil.rmtree(out / "slides")
-    for f in slide_files:
-        (out / f).parent.mkdir(exist_ok=True)
+    for stale in out.iterdir():                  # docs/ is generated: clear everything but .nojekyll
+        if stale.name != ".nojekyll":
+            shutil.rmtree(stale) if stale.is_dir() else stale.unlink()
+    for f in local:
+        (out / f).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(ROOT / f, out / f)
     (out / ".nojekyll").write_text("", encoding="utf-8")
-    for name, text in rendered.items():
-        (out / name).write_text(text, encoding="utf-8", newline="\n")
-    for s in sessions:
-        print(f"  s{s['n']:02d}  {s['meta']['status']:<8}  {'built' if s['slug'] in shown_slugs else 'skipped'}  {s['file']}")
-    for w in warnings:
-        print("WARNING:", w)
-    print(f"wrote {len(rendered)} page(s) to {out.relative_to(ROOT)}/")
+    (out / "index.html").write_text(render(data, weeks), encoding="utf-8", newline="\n")
+    for w in weeks:
+        state = "  ".join(f"{k}:{'none' if w[k] == 'none' else 'link' if w[k] else 'soon'}" for k, _ in LINKS)
+        print(f"  {week_label(w):<8} {w['start']}  {state}")
+    print(f"wrote docs/index.html (+{len(local)} materials file(s))")
 
 
-# ---------------------------------------------------------------- interface copy (not session content)
-INTRO = """<p>One slide deck per lecture of POLISCI 1. Before class, each deck lists what to read, listen to, or
-explore. After class, it adds the key takeaways and places to go further. Decks appear as the quarter goes on; use
-the arrow keys or swipe to move through the slides. A session's title opens its class slides when they are posted;
-the Status column opens its prep deck.</p>"""
-FOOTER_MD = ("Curated by the POLISCI 1 instructors, Stanford University. Drafted with AI assistance (Claude) from the instructors' "
-             "course materials and reviewed by the instructors before publication; every external link is checked "
-             "before each update.")
-FOOTER = f'<p class="provenance">{FOOTER_MD}</p>'
+FOOTER = ("Maintained by the POLISCI 1 instructors, Stanford University. Drafted with AI assistance (Claude) and "
+          "reviewed by the instructors before publication; every external link is checked before each update.")
 
-# ---------------------------------------------------------------- styles (tokens shared with the POLISCI 158 site)
+# "Jump to this week" = the last module whose Monday is on or before today; before term starts it says Week 1.
+JS = """
+(function () {
+  var mods = Array.prototype.slice.call(document.querySelectorAll('.module'));
+  if (!mods.length) return;
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+  var day = function (m) { var p = m.dataset.start.split('-'); return new Date(+p[0], +p[1] - 1, +p[2]); };
+  var cur = mods[0];
+  mods.forEach(function (m) { if (day(m) <= today) cur = m; });
+  var a = document.getElementById('jump-now');
+  a.href = '#' + cur.id;
+  if (day(mods[0]) > today) { a.textContent = 'Jump to Week 1'; return; }
+  cur.classList.add('current');
+  var pill = document.querySelector('.jump a[href="#' + cur.id + '"]:not(.now)');
+  if (pill) pill.setAttribute('aria-current', 'true');
+})();
+"""
+
 FONTS = ('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,600;'
          '0,700;1,400&amp;family=Source+Serif+4:wght@400;600&amp;display=swap">')
-DARK = ("--bg:#16181b; --surface:#1f2226; --fg:#e6e8eb; --muted:#9aa3ad; --line:#30353b; "
-        "--accent:#e0858a; --accent-soft:#3a2324; color-scheme:dark;")
 LIGHT = ("--bg:#fbf8f4; --surface:#ffffff; --fg:#161719; --muted:#62666c; --line:#e8e1da; "
-         "--accent:#8c1515; --accent-soft:#f3e6e6; color-scheme:light;")
+         "--accent:#8c1515; --accent-soft:#f3e6e6; --on-accent:#ffffff; color-scheme:light;")
+DARK = ("--bg:#16181b; --surface:#1f2226; --fg:#e6e8eb; --muted:#9aa3ad; --line:#30353b; "
+        "--accent:#e0858a; --accent-soft:#3a2324; --on-accent:#16181b; color-scheme:dark;")
 CSS = """
 :root { %LIGHT%
   --font-heading:"Source Serif 4", Georgia, serif;
@@ -404,51 +177,47 @@ CSS = """
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { %DARK% } }
 :root[data-theme="dark"] { %DARK% }
 * { box-sizing:border-box; }
-body { margin:0; background:var(--bg); color:var(--fg); font:17px/1.6 var(--font-body); padding-inline:16px; -webkit-text-size-adjust:100%; }
-h1, h2, h3 { line-height:1.25; text-wrap:balance; }
-h1, h2 { font-family:var(--font-heading); font-weight:600; }
-h1 { font-size:2rem; margin:0 0 1rem; }
-h2 { font-size:1.4rem; margin:2.25rem 0 .75rem; }
-h3 { font-weight:600; font-size:1.08rem; margin:1.5rem 0 .5rem; }
+html { scroll-behavior:smooth; scroll-padding-top:4.5rem; }
+body { margin:0; background:var(--bg); color:var(--fg); font:17px/1.55 var(--font-body); -webkit-text-size-adjust:100%; }
 a { color:var(--accent); text-underline-offset:.15em; }
 :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-li { margin:.4rem 0; }
-.layout { display:grid; grid-template-columns:16rem minmax(0, 44rem); column-gap:3rem; justify-content:center; padding-block:2rem 4rem; }
-main { min-width:0; }
-.site { grid-column:1 / -1; border-bottom:1px solid var(--line); padding-bottom:1rem; margin-bottom:2rem; }
-.site p { margin:0; }
-.site p:first-child a { color:var(--muted); font-size:.85rem; letter-spacing:.04em; text-decoration:none; }
-.site-title { font-family:var(--font-heading); font-size:1.5rem; font-weight:600; margin-top:.2rem !important; }
-.banner { margin-top:.75rem !important; padding-left:.75rem; border-left:3px solid var(--accent); }
-.layout > nav { position:sticky; top:1rem; align-self:start; max-height:calc(100vh - 2rem); overflow-y:auto; }
-nav ul { list-style:none; margin:0; padding:0; }
-nav li { margin:0; }
-nav li a, nav li span { display:block; padding:.3rem 0 .3rem .75rem; border-left:2px solid transparent; color:var(--fg); text-decoration:none; font-size:.95rem; line-height:1.35; }
-nav li a:hover { color:var(--accent); }
-nav li a[aria-current="page"] { color:var(--accent); border-left-color:var(--accent); font-weight:600; }
-.muted, nav li span.muted { color:var(--muted); }
-.nav-group { margin:0 0 .35rem; font-size:.75rem; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
-.kicker { margin:0 0 .25rem; color:var(--muted); font-size:.9rem; letter-spacing:.03em; }
-.table-wrap { overflow-x:auto; margin:1rem 0 1.5rem; }
-table { border-collapse:collapse; width:100%; font-size:.95rem; }
-th, td { padding:.5rem .65rem; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); }
-thead th { background:var(--surface); font-weight:600; }
-.pager { display:flex; justify-content:space-between; gap:1rem; margin-top:3rem; padding-top:1.25rem; border-top:1px solid var(--line); }
-.pager a { font-weight:600; text-decoration:none; }
-.pager .next { margin-left:auto; text-align:right; }
+.site, main, .jump-inner { max-width:48rem; margin:0 auto; padding-inline:16px; }
+.site { padding-top:2.5rem; }
+.eyebrow { margin:0; color:var(--muted); font-size:.85rem; letter-spacing:.06em; text-transform:uppercase; }
+h1, h2 { font-family:var(--font-heading); font-weight:600; line-height:1.2; text-wrap:balance; }
+h1 { font-size:2.1rem; margin:.3rem 0 .6rem; }
+.intro { margin:0 0 1rem; color:var(--muted); }
+.jump { position:sticky; top:0; z-index:2; background:var(--bg); border-bottom:1px solid var(--line); }
+.jump-inner { display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; padding-block:.65rem; }
+.jump a { display:inline-block; min-width:2.25rem; padding:.3rem .6rem; border:1px solid var(--line); border-radius:999px;
+  background:var(--surface); color:var(--fg); text-align:center; text-decoration:none; font-size:.9rem; }
+.jump a:hover, .jump a[aria-current] { border-color:var(--accent); color:var(--accent); }
+.jump a.now { background:var(--accent); border-color:var(--accent); color:var(--on-accent); font-weight:600; margin-right:.5rem; }
+.jump-label { color:var(--muted); font-size:.85rem; }
+main { padding-block:1.5rem 4rem; }
+.module { background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:1.1rem 1.25rem 1.2rem; margin:0 0 1rem; }
+.module.current { border-color:var(--accent); box-shadow:inset 4px 0 0 var(--accent); }
+.kicker { margin:0; color:var(--muted); font-size:.88rem; font-weight:600; letter-spacing:.03em; }
+.module h2 { font-size:1.25rem; margin:.2rem 0 .5rem; }
+.sessions { margin:0 0 .5rem; padding-left:1.1rem; }
+.sessions li { margin:.15rem 0; }
+.note { margin:.25rem 0 .6rem; color:var(--muted); font-size:.92rem; }
+.links { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:.5rem; margin-top:.75rem; }
+.chip { display:flex; flex-direction:column; padding:.55rem .75rem; border:1px solid var(--line); border-radius:8px;
+  font-weight:600; text-decoration:none; color:var(--accent); background:var(--accent-soft); }
+.chip small { font-weight:400; font-size:.8rem; color:var(--muted); }
+a.chip:hover { border-color:var(--accent); }
+.chip.soon, .chip.off { background:transparent; color:var(--muted); }
+.chip.off { opacity:.6; }
 .provenance { margin-top:2rem; color:var(--muted); font-size:.88rem; }
-@media (max-width: 899px) {
+@media (max-width: 560px) {
   body { font-size:16px; }
-  .layout { grid-template-columns:minmax(0, 1fr); padding-block:1.25rem 3rem; }
-  .layout > nav { position:static; max-height:none; order:3; border-top:1px solid var(--line); margin-top:2.5rem; padding-top:1rem; }
-  .site { margin-bottom:1.5rem; }
-  nav li a, nav li span { padding-block:.6rem; }
-  .pager { flex-direction:column; gap:.75rem; }
-  .pager .next { margin-left:0; text-align:left; }
+  h1 { font-size:1.7rem; }
+  .links { grid-template-columns:minmax(0, 1fr); }
 }
 @media print {
   :root, :root:not([data-theme="light"]), :root[data-theme="dark"] { %LIGHT% }
-  .layout { display:block; } .layout > nav, .pager { display:none; }
+  .jump { position:static; }
 }
 """.replace("%LIGHT%", LIGHT).replace("%DARK%", DARK)
 
